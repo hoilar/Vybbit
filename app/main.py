@@ -5,11 +5,12 @@ import json
 import os
 import random
 import string
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Optional
 
-from fastapi import FastAPI, HTTPException, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse
 from fastapi.staticfiles import StaticFiles
@@ -71,6 +72,10 @@ class GuessPayload(BaseModel):
     guess_player_id: str = Field(min_length=1)
 
 
+class RoomSettingsPayload(BaseModel):
+    guess_duration_seconds: int = Field(ge=5, le=60)
+
+
 @dataclass
 class Player:
     player_id: str
@@ -116,12 +121,20 @@ class Room:
     code: str
     host_id: str
     players: dict[str, Player] = field(default_factory=dict)
+    guess_duration_seconds: int = 15
+    reveal_duration_seconds: int = 11
     started: bool = False
     rounds: list[dict[str, Any]] = field(default_factory=list)
     current_round_index: int = -1
     current_guesses: dict[str, str] = field(default_factory=dict)
     reveal_round: bool = False
     winner_id: Optional[str] = None
+    round_phase: str = "lobby"
+    phase_ends_at: Optional[float] = None
+    phase_started_at: Optional[float] = None
+    paused: bool = False
+    paused_remaining_seconds: Optional[float] = None
+    timer_task: Optional[asyncio.Task] = field(default=None, repr=False, compare=False)
 
     def current_round(self) -> Optional[dict[str, Any]]:
         if 0 <= self.current_round_index < len(self.rounds):
@@ -132,11 +145,10 @@ class Room:
         round_data = self.current_round()
         if not round_data:
             return []
-        owner_id = round_data["ownerPlayerId"]
         return [
             player_id
             for player_id, player in self.players.items()
-            if player_id != owner_id and player.connected
+            if player.connected
         ]
 
 
@@ -146,11 +158,16 @@ class RoomManager:
         self.connections: dict[str, dict[str, set[WebSocket]]] = {}
         self.lock = asyncio.Lock()
 
-    async def create_room(self, host_name: str) -> tuple[Room, Player]:
+    async def create_room(self, host_name: str, guess_duration_seconds: int) -> tuple[Room, Player]:
         async with self.lock:
             code = self._generate_room_code()
             host = Player(player_id=self._generate_player_id(), name=host_name.strip(), is_host=True)
-            room = Room(code=code, host_id=host.player_id, players={host.player_id: host})
+            room = Room(
+                code=code,
+                host_id=host.player_id,
+                players={host.player_id: host},
+                guess_duration_seconds=guess_duration_seconds,
+            )
             self.rooms[code] = room
             self.connections[code] = {}
             return room, host
@@ -173,6 +190,15 @@ class RoomManager:
             player.spotify_name = payload.display_name
             player.playlists = payload.playlists[:20]
             player.tracks = payload.tracks[:300]
+            return room
+
+    async def update_room_settings(self, code: str, player_id: str, payload: RoomSettingsPayload) -> Room:
+        async with self.lock:
+            room = self._get_room(code)
+            self._assert_host(room, player_id)
+            if room.started:
+                raise HTTPException(status_code=400, detail="Kan ikke endre gjettetid mens spillet paa gar.")
+            room.guess_duration_seconds = payload.guess_duration_seconds
             return room
 
     async def set_guest_playlist(self, code: str, player_id: str, payload: PlaylistLinkPayload) -> Room:
@@ -214,14 +240,17 @@ class RoomManager:
                 raise HTTPException(status_code=400, detail="Spillet er allerede startet.")
             if any(not player.ready() for player in room.players.values()):
                 raise HTTPException(status_code=400, detail="Alle spillere må være klare før start.")
-            round_pool: list[dict[str, Any]] = []
+            track_owners: dict[str, set[str]] = {}
+            track_pool: list[dict[str, Any]] = []
             for player in room.players.values():
                 for track in player.tracks:
                     if not track.get("uri"):
                         continue
-                    round_pool.append(
+                    track_id = track.get("id") or track.get("uri")
+                    track_owners.setdefault(track_id, set()).add(player.player_id)
+                    track_pool.append(
                         {
-                            "trackId": track.get("id"),
+                            "trackId": track_id,
                             "name": track.get("name"),
                             "artists": track.get("artists", []),
                             "albumImage": track.get("albumImage"),
@@ -232,14 +261,22 @@ class RoomManager:
                             "ownerName": player.name,
                         }
                     )
+            round_pool = [
+                track
+                for track in track_pool
+                if len(track_owners.get(track["trackId"], set())) == 1
+            ]
             if len(round_pool) < rounds:
-                raise HTTPException(status_code=400, detail="For få sanger tilgjengelig for valgt antall runder.")
+                raise HTTPException(
+                    status_code=400,
+                    detail="For få unike sanger tilgjengelig for valgt antall runder.",
+                )
             room.rounds = random.sample(round_pool, k=rounds)
             room.started = True
             room.current_round_index = 0
             room.current_guesses = {}
-            room.reveal_round = False
             room.winner_id = None
+            self._start_guess_phase_locked(room)
             return room
 
     async def submit_guess(self, code: str, player_id: str, guess_player_id: str) -> Room:
@@ -250,10 +287,8 @@ class RoomManager:
             current_round = room.current_round()
             if not current_round:
                 raise HTTPException(status_code=400, detail="Ingen aktiv runde.")
-            if room.reveal_round:
+            if room.round_phase != "guessing":
                 raise HTTPException(status_code=400, detail="Runden er allerede avslørt.")
-            if player_id == current_round["ownerPlayerId"] and len(room.players) > 1:
-                raise HTTPException(status_code=400, detail="Du kan ikke gjette på din egen sang.")
             if guess_player_id not in room.players:
                 raise HTTPException(status_code=404, detail="Ugyldig spiller.")
             room.current_guesses[player_id] = guess_player_id
@@ -268,22 +303,83 @@ class RoomManager:
             self._assert_host(room, player_id)
             if not room.started:
                 raise HTTPException(status_code=400, detail="Spillet er ikke startet.")
-            if not room.reveal_round:
+            if room.round_phase == "guessing":
                 self._reveal_round_locked(room)
-            if room.current_round_index >= len(room.rounds) - 1:
-                room.started = False
-                room.winner_id = self._winner_id(room)
                 return room
-            room.current_round_index += 1
-            room.current_guesses = {}
-            room.reveal_round = False
+            self._advance_round_locked(room)
             return room
 
+    async def reset_game(self, code: str, player_id: str) -> Room:
+        async with self.lock:
+            room = self._get_room(code)
+            self._assert_host(room, player_id)
+            self._cancel_timer_locked(room)
+            room.started = False
+            room.rounds = []
+            room.current_round_index = -1
+            room.current_guesses = {}
+            room.reveal_round = False
+            room.winner_id = None
+            room.round_phase = "lobby"
+            room.phase_ends_at = None
+            room.phase_started_at = None
+            room.paused = False
+            room.paused_remaining_seconds = None
+            for participant in room.players.values():
+                participant.score = 0
+            return room
+
+    async def toggle_pause(self, code: str, player_id: str) -> Room:
+        async with self.lock:
+            room = self._get_room(code)
+            self._assert_host(room, player_id)
+            if not room.started or room.round_phase not in {"guessing", "reveal"}:
+                raise HTTPException(status_code=400, detail="Det er ingen aktiv runde aa pause.")
+            now = time.time()
+            if room.paused:
+                room.paused = False
+                remaining = room.paused_remaining_seconds or 0
+                room.phase_started_at = now
+                room.phase_ends_at = now + remaining
+                self._schedule_timer_locked(room, room.round_phase, room.current_round_index, room.phase_ends_at)
+            else:
+                room.paused = True
+                room.paused_remaining_seconds = max((room.phase_ends_at or now) - now, 0)
+                room.phase_ends_at = None
+                self._cancel_timer_locked(room)
+            return room
+
+    async def leave_room(self, code: str, player_id: str) -> Optional[Room]:
+        async with self.lock:
+            room = self._get_room(code)
+            if room.host_id == player_id:
+                raise HTTPException(status_code=400, detail="Host maa bruke avslutt spill.")
+            player = self._get_player(room, player_id)
+            self.connections.get(room.code, {}).pop(player_id, None)
+            room.players.pop(player_id, None)
+            if room.started and room.round_phase == "guessing":
+                expected = room.expected_guessers()
+                if expected and all(guesser in room.current_guesses for guesser in expected):
+                    self._reveal_round_locked(room)
+            return room
+
+    async def end_room(self, code: str, player_id: str) -> list[WebSocket]:
+        async with self.lock:
+            room = self._get_room(code)
+            self._assert_host(room, player_id)
+            self._cancel_timer_locked(room)
+            sockets: list[WebSocket] = []
+            for player_sockets in self.connections.get(room.code, {}).values():
+                sockets.extend(list(player_sockets))
+            self.connections.pop(room.code, None)
+            self.rooms.pop(room.code, None)
+            return sockets
+
     async def connect(self, code: str, player_id: str, websocket: WebSocket) -> Room:
-        await websocket.accept()
         async with self.lock:
             room = self._get_room(code)
             player = self._get_player(room, player_id)
+            await websocket.accept()
             player.connected = True
             self.connections.setdefault(code, {}).setdefault(player_id, set()).add(websocket)
             return room
@@ -300,6 +396,10 @@ class RoomManager:
                 player = room.players.get(player_id)
                 if player:
                     player.connected = False
+            if room.started and room.round_phase == "guessing":
+                expected = room.expected_guessers()
+                if expected and all(guesser in room.current_guesses for guesser in expected):
+                    self._reveal_round_locked(room)
             return room
 
     async def broadcast_state(self, code: str) -> None:
@@ -337,10 +437,17 @@ class RoomManager:
                 "revealed": room.reveal_round,
                 "guessCount": len(room.current_guesses),
                 "expectedGuessers": len(room.expected_guessers()),
+                "phase": room.round_phase,
+                "phaseEndsAt": room.phase_ends_at,
+                "phaseStartedAt": room.phase_started_at,
+                "paused": room.paused,
+                "pausedRemainingSeconds": room.paused_remaining_seconds,
             }
         return {
             "code": room.code,
             "started": room.started,
+            "guessDurationSeconds": room.guess_duration_seconds,
+            "revealDurationSeconds": room.reveal_duration_seconds,
             "players": [player.public_state() for player in room.players.values()],
             "hostId": room.host_id,
             "currentRound": round_payload,
@@ -355,17 +462,78 @@ class RoomManager:
         current_round = room.current_round()
         if not current_round:
             return
+        self._cancel_timer_locked(room)
         room.reveal_round = True
+        room.round_phase = "reveal"
+        room.paused = False
+        room.paused_remaining_seconds = None
+        room.phase_started_at = time.time()
+        room.phase_ends_at = room.phase_started_at + room.reveal_duration_seconds
         owner_id = current_round["ownerPlayerId"]
         for guesser_id, guess_player_id in room.current_guesses.items():
             if guess_player_id == owner_id:
                 room.players[guesser_id].score += 1
+        self._schedule_timer_locked(room, "reveal", room.current_round_index, room.phase_ends_at)
 
     def _winner_id(self, room: Room) -> Optional[str]:
         ranked = sorted(room.players.values(), key=lambda player: player.score, reverse=True)
         if not ranked:
             return None
         return ranked[0].player_id
+
+    def _start_guess_phase_locked(self, room: Room) -> None:
+        self._cancel_timer_locked(room)
+        room.reveal_round = False
+        room.round_phase = "guessing"
+        room.current_guesses = {}
+        room.paused = False
+        room.paused_remaining_seconds = None
+        room.phase_started_at = time.time()
+        room.phase_ends_at = room.phase_started_at + room.guess_duration_seconds
+        self._schedule_timer_locked(room, "guessing", room.current_round_index, room.phase_ends_at)
+
+    def _advance_round_locked(self, room: Room) -> None:
+        self._cancel_timer_locked(room)
+        if room.current_round_index >= len(room.rounds) - 1:
+            room.started = False
+            room.winner_id = self._winner_id(room)
+            room.round_phase = "finished"
+            room.phase_ends_at = None
+            room.phase_started_at = None
+            room.paused = False
+            room.paused_remaining_seconds = None
+            return
+        room.current_round_index += 1
+        self._start_guess_phase_locked(room)
+
+    def _cancel_timer_locked(self, room: Room) -> None:
+        if room.timer_task:
+            room.timer_task.cancel()
+            room.timer_task = None
+
+    def _schedule_timer_locked(self, room: Room, phase: str, round_index: int, ends_at: float) -> None:
+        self._cancel_timer_locked(room)
+        room.timer_task = asyncio.create_task(self._run_phase_timer(room.code, phase, round_index, ends_at))
+
+    async def _run_phase_timer(self, code: str, phase: str, round_index: int, ends_at: float) -> None:
+        delay = max(ends_at - time.time(), 0)
+        try:
+            await asyncio.sleep(delay)
+        except asyncio.CancelledError:
+            return
+        async with self.lock:
+            room = self.rooms.get(code)
+            if not room:
+                return
+            if room.current_round_index != round_index or room.round_phase != phase or room.paused:
+                return
+            if room.phase_ends_at is None or abs(room.phase_ends_at - ends_at) > 0.05:
+                return
+            if phase == "guessing":
+                self._reveal_round_locked(room)
+            elif phase == "reveal":
+                self._advance_round_locked(room)
+        await self.broadcast_state(code)
 
     def _get_room(self, code: str) -> Room:
         room = self.rooms.get(code.upper())
@@ -402,6 +570,18 @@ app.add_middleware(
     allow_methods=["*"],
     allow_headers=["*"],
 )
+
+
+@app.middleware("http")
+async def disable_cache(request: Request, call_next):
+    response = await call_next(request)
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        response.headers["Pragma"] = "no-cache"
+        response.headers["Expires"] = "0"
+    return response
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 
 
@@ -415,7 +595,7 @@ async def get_config() -> dict[str, Optional[str]]:
 
 @app.post("/api/rooms")
 async def create_room(payload: CreateRoomPayload) -> dict[str, Any]:
-    room, host = await manager.create_room(payload.host_name)
+    room, host = await manager.create_room(payload.host_name, 15)
     await manager.broadcast_state(room.code)
     return {"roomCode": room.code, "playerId": host.player_id, "room": manager.serialize_room(room)}
 
@@ -436,6 +616,13 @@ async def get_room(code: str) -> dict[str, Any]:
 @app.post("/api/rooms/{code}/players/{player_id}/host-spotify")
 async def sync_host_spotify(code: str, player_id: str, payload: HostSpotifyPayload) -> dict[str, Any]:
     room = await manager.sync_host_spotify(code, player_id, payload)
+    await manager.broadcast_state(room.code)
+    return manager.serialize_room(room)
+
+
+@app.post("/api/rooms/{code}/players/{player_id}/settings")
+async def update_room_settings(code: str, player_id: str, payload: RoomSettingsPayload) -> dict[str, Any]:
+    room = await manager.update_room_settings(code, player_id, payload)
     await manager.broadcast_state(room.code)
     return manager.serialize_room(room)
 
@@ -475,13 +662,50 @@ async def next_round(code: str, player_id: str) -> dict[str, Any]:
     return manager.serialize_room(room)
 
 
+@app.post("/api/rooms/{code}/players/{player_id}/pause")
+async def toggle_pause(code: str, player_id: str) -> dict[str, Any]:
+    room = await manager.toggle_pause(code, player_id)
+    await manager.broadcast_state(room.code)
+    return manager.serialize_room(room)
+
+
+@app.post("/api/rooms/{code}/players/{player_id}/leave")
+async def leave_room(code: str, player_id: str) -> dict[str, Any]:
+    room = await manager.leave_room(code, player_id)
+    if room:
+        await manager.broadcast_state(room.code)
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{code}/players/{player_id}/end")
+async def end_room(code: str, player_id: str) -> dict[str, Any]:
+    sockets = await manager.end_room(code, player_id)
+    payload = json.dumps({"type": "room_closed", "reason": "host_ended"})
+    for websocket in sockets:
+        try:
+            await websocket.send_text(payload)
+            await websocket.close(code=1001)
+        except Exception:
+            pass
+    return {"ok": True}
+
+
+@app.post("/api/rooms/{code}/players/{player_id}/reset")
+async def reset_game(code: str, player_id: str) -> dict[str, Any]:
+    room = await manager.reset_game(code, player_id)
+    await manager.broadcast_state(room.code)
+    return manager.serialize_room(room)
+
+
 @app.websocket("/ws/{code}/{player_id}")
 async def room_ws(websocket: WebSocket, code: str, player_id: str) -> None:
-    room = await manager.connect(code.upper(), player_id, websocket)
-    await manager.broadcast_state(room.code)
     try:
+        room = await manager.connect(code.upper(), player_id, websocket)
+        await manager.broadcast_state(room.code)
         while True:
             await websocket.receive_text()
+    except HTTPException:
+        await websocket.close(code=1008)
     except WebSocketDisconnect:
         room = await manager.disconnect(code.upper(), player_id, websocket)
         if room:

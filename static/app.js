@@ -5,13 +5,21 @@ const state = {
   room: null,
   spotifyToken: null,
   spotifyProfile: null,
-  selectedGuess: null,
+  hostPlaylists: [],
+  selectedHostPlaylistId: null,
   websocket: null,
   spotifyDeviceId: null,
   spotifyPlayer: null,
   spotifyPlayerReady: null,
   previewAudio: null,
   syncInFlight: false,
+  submittingGuess: false,
+  activeRoundToken: null,
+  roundAnnouncement: "",
+  roundAnnouncementTimer: null,
+  websocketReconnectTimer: null,
+  phaseTickTimer: null,
+  suppressReconnect: false,
 };
 
 const els = {
@@ -26,6 +34,8 @@ const els = {
   roomCodeDisplay: document.querySelector("#room-code-display"),
   copyRoomCodeBtn: document.querySelector("#copy-room-code-btn"),
   connectSpotifyBtn: document.querySelector("#connect-spotify-btn"),
+  leaveRoomBtn: document.querySelector("#leave-room-btn"),
+  endRoomBtn: document.querySelector("#end-room-btn"),
   spotifyStatus: document.querySelector("#spotify-status"),
   hostCacheStatus: document.querySelector("#host-cache-status"),
   roomHint: document.querySelector("#room-hint"),
@@ -34,21 +44,26 @@ const els = {
   hostControlsCard: document.querySelector("#host-controls-card"),
   hostSyncStatus: document.querySelector("#host-sync-status"),
   syncPlaylistsBtn: document.querySelector("#sync-playlists-btn"),
+  hostPlaylistSelect: document.querySelector("#host-playlist-select"),
   guestPlaylistCard: document.querySelector("#guest-playlist-card"),
   guestPlaylistUrl: document.querySelector("#guest-playlist-url"),
   savePlaylistBtn: document.querySelector("#save-playlist-btn"),
   guestPlaylistStatus: document.querySelector("#guest-playlist-status"),
   roundCount: document.querySelector("#round-count"),
+  guessDuration: document.querySelector("#guess-duration"),
   startGameBtn: document.querySelector("#start-game-btn"),
+  resetGameBtn: document.querySelector("#reset-game-btn"),
   nextRoundBtn: document.querySelector("#next-round-btn"),
   roundProgress: document.querySelector("#round-progress"),
+  roundAnnouncement: document.querySelector("#round-announcement"),
+  phaseTimer: document.querySelector("#phase-timer"),
   albumCover: document.querySelector("#album-cover"),
   playbackStatus: document.querySelector("#playback-status"),
   playTrackBtn: document.querySelector("#play-track-btn"),
   playPreviewBtn: document.querySelector("#play-preview-btn"),
+  pauseGameBtn: document.querySelector("#pause-game-btn"),
   revealBox: document.querySelector("#reveal-box"),
   guessOptions: document.querySelector("#guess-options"),
-  submitGuessBtn: document.querySelector("#submit-guess-btn"),
 };
 
 const storageKey = "guessify-session";
@@ -67,25 +82,35 @@ async function boot() {
   restoreSpotifySession();
   await handleSpotifyCallback();
   bindEvents();
+  startPhaseTicker();
   if (state.roomCode && state.playerId) {
     await refreshRoom();
     connectWebSocket();
+    if (state.spotifyToken && isHost()) {
+      await syncRoomPlaylists().catch((error) => {
+        els.hostSyncStatus.textContent = error.message || "Kunne ikke oppdatere spillelister.";
+      });
+    }
   }
   render();
 }
 
 function bindEvents() {
-  els.createRoomBtn.addEventListener("click", onCreateRoom);
-  els.joinRoomBtn.addEventListener("click", onJoinRoom);
-  els.copyRoomCodeBtn.addEventListener("click", () => navigator.clipboard.writeText(state.roomCode ?? ""));
-  els.connectSpotifyBtn.addEventListener("click", connectSpotify);
-  els.syncPlaylistsBtn.addEventListener("click", syncRoomPlaylists);
-  els.savePlaylistBtn.addEventListener("click", onSaveGuestPlaylist);
-  els.startGameBtn.addEventListener("click", onStartGame);
-  els.nextRoundBtn.addEventListener("click", onNextRound);
-  els.submitGuessBtn.addEventListener("click", onSubmitGuess);
-  els.playTrackBtn.addEventListener("click", onPlayTrack);
-  els.playPreviewBtn.addEventListener("click", onPlayPreview);
+  els.createRoomBtn?.addEventListener("click", onCreateRoom);
+  els.joinRoomBtn?.addEventListener("click", onJoinRoom);
+  els.copyRoomCodeBtn?.addEventListener("click", () => navigator.clipboard.writeText(state.roomCode ?? ""));
+  els.connectSpotifyBtn?.addEventListener("click", connectSpotify);
+  els.leaveRoomBtn?.addEventListener("click", onLeaveRoom);
+  els.endRoomBtn?.addEventListener("click", onEndRoom);
+  els.syncPlaylistsBtn?.addEventListener("click", syncRoomPlaylists);
+  els.hostPlaylistSelect?.addEventListener("change", onHostPlaylistChange);
+  els.savePlaylistBtn?.addEventListener("click", onSaveGuestPlaylist);
+  els.startGameBtn?.addEventListener("click", onStartGame);
+  els.resetGameBtn?.addEventListener("click", onResetGame);
+  els.nextRoundBtn?.addEventListener("click", onNextRound);
+  els.pauseGameBtn?.addEventListener("click", onTogglePause);
+  els.playTrackBtn?.addEventListener("click", onPlayTrack);
+  els.playPreviewBtn?.addEventListener("click", onPlayPreview);
 }
 
 async function onCreateRoom() {
@@ -142,10 +167,36 @@ async function onSaveGuestPlaylist() {
   els.guestPlaylistStatus.textContent = "Playlist lagret. Venter på at host importerer sporene.";
 }
 
+async function onHostPlaylistChange() {
+  state.selectedHostPlaylistId = els.hostPlaylistSelect.value || null;
+  if (!state.selectedHostPlaylistId || !state.spotifyToken || !isHost()) {
+    return;
+  }
+  await syncHostLibrary();
+  await refreshRoom();
+}
+
 async function onStartGame() {
+  await saveGuessDuration();
+  if (isHost() && state.spotifyToken) {
+    if (!state.selectedHostPlaylistId) {
+      alert("Velg din egen Spotify-playlist først.");
+      return;
+    }
+    await syncRoomPlaylists();
+  }
   await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/start`, {
     method: "POST",
     body: JSON.stringify({ rounds: Number(els.roundCount.value || 5) }),
+  });
+}
+
+async function onResetGame() {
+  if (!confirm("Vil du starte et nytt spill? Poeng og runder nullstilles.")) {
+    return;
+  }
+  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/reset`, {
+    method: "POST",
   });
 }
 
@@ -155,35 +206,103 @@ async function onNextRound() {
   });
 }
 
-async function onSubmitGuess() {
-  if (!state.selectedGuess) {
-    alert("Velg en spiller først.");
-    return;
-  }
-  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/guess`, {
+async function onTogglePause() {
+  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/pause`, {
     method: "POST",
-    body: JSON.stringify({ guess_player_id: state.selectedGuess }),
   });
 }
 
-async function refreshRoom() {
-  state.room = await fetchJson(`/api/rooms/${state.roomCode}`);
+async function onLeaveRoom() {
+  if (!confirm("Vil du forlate rommet?")) {
+    return;
+  }
+  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/leave`, {
+    method: "POST",
+  }).catch(() => {});
+  clearRoomState();
   render();
+}
+
+async function onEndRoom() {
+  if (!confirm("Vil du avslutte spillet for alle og stenge rommet?")) {
+    return;
+  }
+  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/end`, {
+    method: "POST",
+  }).catch(() => {});
+  clearRoomState();
+  render();
+}
+
+async function saveGuessDuration() {
+  if (!isHost() || state.room?.started) {
+    return;
+  }
+  const guessDurationSeconds = Number(els.guessDuration.value || 15);
+  if (guessDurationSeconds === state.room?.guessDurationSeconds) {
+    return;
+  }
+  await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/settings`, {
+    method: "POST",
+    body: JSON.stringify({ guess_duration_seconds: guessDurationSeconds }),
+  });
+}
+
+async function submitGuess(guessPlayerId) {
+  if (state.submittingGuess) {
+    return;
+  }
+  state.submittingGuess = true;
+  try {
+    await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/guess`, {
+      method: "POST",
+      body: JSON.stringify({ guess_player_id: guessPlayerId }),
+    });
+  } finally {
+    state.submittingGuess = false;
+  }
+}
+
+async function refreshRoom() {
+  try {
+    state.room = await fetchJson(`/api/rooms/${state.roomCode}`);
+    render();
+  } catch (error) {
+    if (error.message?.includes("Fant ikke rommet")) {
+      clearRoomState();
+      render();
+      return;
+    }
+    throw error;
+  }
 }
 
 function connectWebSocket() {
   if (!state.roomCode || !state.playerId) {
     return;
   }
+  state.suppressReconnect = false;
+  clearTimeout(state.websocketReconnectTimer);
   state.websocket?.close();
   const protocol = location.protocol === "https:" ? "wss:" : "ws:";
   state.websocket = new WebSocket(`${protocol}//${location.host}/ws/${state.roomCode}/${state.playerId}`);
+  state.websocket.addEventListener("open", () => {
+    clearTimeout(state.websocketReconnectTimer);
+  });
   state.websocket.addEventListener("message", async (event) => {
     const message = JSON.parse(event.data);
+    if (message.type === "room_closed") {
+      clearRoomState();
+      render();
+      alert("Rommet ble avsluttet av host.");
+      return;
+    }
     if (message.type !== "room_state") {
       return;
     }
+    const previousRoundToken = getRoundToken(state.room);
     state.room = message.room;
+    handleRoundStateChange(previousRoundToken, getRoundToken(state.room));
       if (isHost()) {
         const cache = {
           savedAt: new Date().toISOString(),
@@ -199,6 +318,57 @@ function connectWebSocket() {
       }
     render();
   });
+  state.websocket.addEventListener("close", scheduleWebSocketReconnect);
+  state.websocket.addEventListener("error", scheduleWebSocketReconnect);
+}
+
+function scheduleWebSocketReconnect() {
+  if (state.suppressReconnect || !state.roomCode || !state.playerId) {
+    return;
+  }
+  clearTimeout(state.websocketReconnectTimer);
+  state.websocketReconnectTimer = window.setTimeout(async () => {
+    try {
+      await refreshRoom();
+    } catch {}
+    if (state.suppressReconnect || !state.roomCode || !state.playerId) {
+      return;
+    }
+    connectWebSocket();
+  }, 1000);
+}
+
+function startPhaseTicker() {
+  clearInterval(state.phaseTickTimer);
+  state.phaseTickTimer = window.setInterval(() => {
+    updatePhaseTimer();
+  }, 250);
+}
+
+function updatePhaseTimer() {
+  const round = state.room?.currentRound;
+  if (!round || !els.phaseTimer) {
+    return;
+  }
+  if (round.paused) {
+    const remaining = Math.max(Math.ceil(round.pausedRemainingSeconds || 0), 0);
+    els.phaseTimer.textContent = `Pauset med ${remaining}s igjen`;
+    return;
+  }
+  if (!round.phaseEndsAt) {
+    els.phaseTimer.textContent = "";
+    return;
+  }
+  const remaining = Math.max(Math.ceil(round.phaseEndsAt - Date.now() / 1000), 0);
+  if (round.phase === "guessing") {
+    els.phaseTimer.textContent = `Tid igjen: ${remaining}s`;
+    return;
+  }
+  if (round.phase === "reveal") {
+    els.phaseTimer.textContent = `Neste sang om ${remaining}s`;
+    return;
+  }
+  els.phaseTimer.textContent = "";
 }
 
 async function connectSpotify() {
@@ -270,31 +440,58 @@ async function syncHostLibrary() {
   if (!state.spotifyToken || !isHost()) {
     return;
   }
-  const [profile, playlistsPage] = await Promise.all([
+  const [profile, playlists] = await Promise.all([
     fetchSpotify("https://api.spotify.com/v1/me"),
-    fetchSpotify("https://api.spotify.com/v1/me/playlists?limit=10"),
+    fetchAllSpotifyPlaylists(),
   ]);
   state.spotifyProfile = profile;
-  const playlists = playlistsPage.items || [];
-  const tracks = [];
-  for (const playlist of playlists) {
-    const playlistTracks = await fetchPlaylistTracks(playlist.id, playlist.name);
-    tracks.push(...playlistTracks);
+  state.hostPlaylists = playlists.map((playlist) => ({
+    id: playlist.id,
+    name: playlist.name,
+    trackCount: playlist.tracks?.total || 0,
+  }));
+  if (!state.selectedHostPlaylistId && state.hostPlaylists.length) {
+    state.selectedHostPlaylistId = state.hostPlaylists[0].id;
   }
-  const uniqueTracks = dedupeTracks(tracks);
+  renderHostPlaylistSelect();
+  if (!state.selectedHostPlaylistId) {
+    await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/host-spotify`, {
+      method: "POST",
+      body: JSON.stringify({
+        spotify_id: profile.id,
+        display_name: profile.display_name || profile.id,
+        playlists: state.hostPlaylists,
+        tracks: [],
+      }),
+    });
+    els.hostSyncStatus.textContent = "Velg en host-playlist for aa bruke dine egne spor.";
+    return;
+  }
+  const selectedPlaylist = state.hostPlaylists.find((playlist) => playlist.id === state.selectedHostPlaylistId);
+  const tracks = await fetchPlaylistTracks(state.selectedHostPlaylistId, selectedPlaylist?.name || null);
   await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/host-spotify`, {
     method: "POST",
     body: JSON.stringify({
       spotify_id: profile.id,
       display_name: profile.display_name || profile.id,
-      playlists: playlists.map((playlist) => ({
-        id: playlist.id,
-        name: playlist.name,
-        trackCount: playlist.tracks?.total || 0,
-      })),
-      tracks: uniqueTracks,
+      playlists: state.hostPlaylists,
+      tracks,
     }),
   });
+  els.hostSyncStatus.textContent = selectedPlaylist
+    ? `Host-playlist valgt: ${selectedPlaylist.name}.`
+    : "Host-playlist oppdatert.";
+}
+
+async function fetchAllSpotifyPlaylists() {
+  const playlists = [];
+  let url = "https://api.spotify.com/v1/me/playlists?limit=50";
+  while (url) {
+    const page = await fetchSpotify(url);
+    playlists.push(...(page.items || []));
+    url = page.next;
+  }
+  return playlists;
 }
 
 async function syncRoomPlaylists() {
@@ -324,29 +521,40 @@ async function syncRoomPlaylists() {
       });
     }
     els.hostSyncStatus.textContent = "Spillelister oppdatert.";
+  } catch (error) {
+    const message = error.message || "Kunne ikke oppdatere spillelister.";
+    if (message.toLowerCase().includes("token") || message.toLowerCase().includes("expired")) {
+      els.hostSyncStatus.textContent = "Spotify-innloggingen er utgaatt. Koble til Spotify pa nytt.";
+    } else {
+      els.hostSyncStatus.textContent = message;
+    }
+    throw error;
   } finally {
     state.syncInFlight = false;
   }
 }
 
 async function fetchPlaylistTracks(playlistId, fallbackName = null) {
-  const payload = await fetchSpotify(
-    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=50&fields=items(track(id,name,uri,preview_url,artists(name),album(images))),next`,
-  );
   const tracks = [];
-  for (const item of payload.items || []) {
-    if (!item.track?.id || !item.track?.uri) {
-      continue;
+  let url =
+    `https://api.spotify.com/v1/playlists/${playlistId}/tracks?limit=100&fields=items(track(id,name,uri,preview_url,artists(name),album(images))),next`;
+  while (url) {
+    const payload = await fetchSpotify(url);
+    for (const item of payload.items || []) {
+      if (!item.track?.id || !item.track?.uri) {
+        continue;
+      }
+      tracks.push({
+        id: item.track.id,
+        name: item.track.name,
+        uri: item.track.uri,
+        previewUrl: item.track.preview_url,
+        artists: (item.track.artists || []).map((artist) => artist.name),
+        albumImage: item.track.album?.images?.[0]?.url || null,
+        playlistName: fallbackName,
+      });
     }
-    tracks.push({
-      id: item.track.id,
-      name: item.track.name,
-      uri: item.track.uri,
-      previewUrl: item.track.preview_url,
-      artists: (item.track.artists || []).map((artist) => artist.name),
-      albumImage: item.track.album?.images?.[0]?.url || null,
-      playlistName: fallbackName,
-    });
+    url = payload.next;
   }
   return dedupeTracks(tracks);
 }
@@ -354,11 +562,11 @@ async function fetchPlaylistTracks(playlistId, fallbackName = null) {
 async function onPlayTrack() {
   const round = state.room?.currentRound;
   if (!round?.uri) {
-    return;
+    return false;
   }
   if (!state.spotifyToken || !isHost()) {
     els.playbackStatus.textContent = "Bare host med Spotify Premium kan spille av full låt.";
-    return;
+    return false;
   }
   try {
     await ensureSpotifyWebPlayer();
@@ -377,8 +585,10 @@ async function onPlayTrack() {
       body: JSON.stringify({ uris: [round.uri] }),
     });
     els.playbackStatus.textContent = "Spiller av via Spotify Premium.";
+    return true;
   } catch (error) {
     els.playbackStatus.textContent = error.message || "Spotify-avspilling feilet.";
+    return false;
   }
 }
 
@@ -392,6 +602,60 @@ async function onPlayPreview() {
   state.previewAudio = new Audio(round.previewUrl);
   await state.previewAudio.play();
   els.playbackStatus.textContent = "Spiller 30-sekunders preview.";
+}
+
+function handleRoundStateChange(previousRoundToken, nextRoundToken) {
+  if (!nextRoundToken || previousRoundToken === nextRoundToken) {
+    return;
+  }
+  state.previewAudio?.pause();
+  state.previewAudio = null;
+  state.activeRoundToken = nextRoundToken;
+  const round = state.room?.currentRound;
+  if (round?.phase === "guessing") {
+    announceRound(round);
+  }
+  if (!round || round.revealed) {
+    return;
+  }
+  playRoundAudioForCurrentUser().catch(() => {
+    if (els.playbackStatus) {
+      els.playbackStatus.textContent = "Ny runde er startet. Trykk Spill preview hvis lyden ikke startet automatisk.";
+    }
+  });
+}
+
+async function playRoundAudioForCurrentUser() {
+  if (isHost() && state.spotifyToken) {
+    const started = await onPlayTrack();
+    if (started) {
+      return;
+    }
+  }
+  await playRoundPreviewForEveryone();
+}
+
+async function playRoundPreviewForEveryone() {
+  const round = state.room?.currentRound;
+  if (!round?.previewUrl) {
+    return;
+  }
+  state.previewAudio?.pause();
+  state.previewAudio = new Audio(round.previewUrl);
+  await state.previewAudio.play();
+  els.playbackStatus.textContent = "Ny runde startet. Spiller preview for alle.";
+}
+
+function announceRound(round) {
+  if (!round) {
+    return;
+  }
+  state.roundAnnouncement = `Runde ${round.index + 1} av ${round.total} starter nå`;
+  clearTimeout(state.roundAnnouncementTimer);
+  state.roundAnnouncementTimer = window.setTimeout(() => {
+    state.roundAnnouncement = "";
+    render();
+  }, 3500);
 }
 
 async function ensureSpotifyWebPlayer() {
@@ -452,6 +716,8 @@ function render() {
     ? "Gjestene limer inn offentlig playlist-lenke. Host importerer sporene."
     : "Lim inn en offentlig Spotify-playlist og vent på at host importerer den.";
   els.connectSpotifyBtn.classList.toggle("hidden", !isHost());
+  els.endRoomBtn.classList.toggle("hidden", !isHost());
+  els.leaveRoomBtn.classList.toggle("hidden", isHost() || !room.winnerId);
   els.hostControlsCard.classList.toggle("hidden", !isHost());
   els.guestPlaylistCard.classList.toggle("hidden", isHost());
   renderPlayers(room);
@@ -477,8 +743,15 @@ function renderPlayers(room) {
     room.players.length >= 1 &&
     room.players.every((player) => player.ready) &&
     !room.started;
+  if (els.guessDuration) {
+    els.guessDuration.value = String(room.guessDurationSeconds || 15);
+    els.guessDuration.disabled = !isHost() || room.started;
+  }
   els.startGameBtn.disabled = !canStart;
+  const canResetGame = isHost() && Boolean(room.started || room.currentRound || room.winnerId);
+  els.resetGameBtn.classList.toggle("hidden", !canResetGame);
   els.syncPlaylistsBtn.disabled = !isHost() || !state.spotifyToken;
+  renderHostPlaylistSelect();
 }
 
 function renderGuestCard(room) {
@@ -500,10 +773,19 @@ function renderGuestCard(room) {
 
 function renderGame(room) {
   const round = room.currentRound;
-  els.nextRoundBtn.classList.toggle("hidden", !isHost() || !round?.revealed);
+  els.nextRoundBtn.classList.toggle("hidden", !isHost() || !round);
+  els.resetGameBtn.classList.toggle("hidden", !isHost() || !Boolean(room.started || room.currentRound || room.winnerId));
+  els.pauseGameBtn.classList.toggle("hidden", !isHost() || !round || !room.started);
   if (!round) {
+    els.roundAnnouncement.textContent = "";
+    els.roundAnnouncement.classList.add("hidden");
+    els.phaseTimer.textContent = "";
     return;
   }
+  els.roundAnnouncement.textContent = state.roundAnnouncement;
+  els.roundAnnouncement.classList.toggle("hidden", !state.roundAnnouncement);
+  els.pauseGameBtn.textContent = round.paused ? "Fortsett" : "Pause";
+  els.nextRoundBtn.textContent = round.phase === "guessing" ? "Avslør nå" : "Neste nå";
   els.roundProgress.textContent = `${round.index + 1} / ${round.total}`;
   els.albumCover.src =
     round.albumImage ||
@@ -511,6 +793,15 @@ function renderGame(room) {
   els.playbackStatus.textContent = round.revealed
     ? "Runden er avslørt. Se hvem som eide sangen."
     : `Venter på gjetninger: ${round.guessCount} / ${round.expectedGuessers}`;
+  if (round.phase === "guessing" && round.paused) {
+    els.playbackStatus.textContent = "Runden er pauset.";
+  }
+  if (!room.started && room.winnerId) {
+    const winner = room.players.find((player) => player.playerId === room.winnerId);
+    els.playbackStatus.textContent = winner
+      ? `Spillet er ferdig. Vinner: ${winner.name}.`
+      : "Spillet er ferdig.";
+  }
   els.revealBox.classList.toggle("hidden", !round.revealed);
   if (round.revealed) {
     els.revealBox.innerHTML = `
@@ -519,6 +810,7 @@ function renderGame(room) {
       Tilhører: <strong>${escapeHtml(round.ownerName || "")}</strong>
     `;
   }
+  updatePhaseTimer();
   renderGuessOptions(room);
 }
 
@@ -527,30 +819,30 @@ function renderGuessOptions(room) {
   if (!round) {
     return;
   }
-  const excludedOwnerId = round.revealed ? round.ownerPlayerId : null;
+  const currentGuess = room.guesses?.[state.playerId] || null;
+  const hasSubmittedGuess = Boolean(currentGuess);
   els.guessOptions.innerHTML = "";
-  state.selectedGuess = null;
-  const allowSelfGuess = room.players.length === 1;
   for (const player of room.players) {
-    if (player.playerId === state.playerId && !allowSelfGuess) {
-      continue;
-    }
-    if (excludedOwnerId && player.playerId === excludedOwnerId) {
-      continue;
-    }
     const button = document.createElement("button");
     button.type = "button";
     button.className = "guess-option";
-    button.innerHTML = `<span>${escapeHtml(player.name)}</span><span class="pill">${player.score} poeng</span>`;
-    button.addEventListener("click", () => {
-      state.selectedGuess = player.playerId;
-      document.querySelectorAll(".guess-option").forEach((node) => node.classList.remove("selected"));
+    if (currentGuess === player.playerId) {
       button.classList.add("selected");
+    }
+    button.innerHTML = `<span>${escapeHtml(player.name)}</span><span class="pill">${player.score} poeng</span>`;
+    button.addEventListener("click", async () => {
+      if (round.phase !== "guessing" || round.paused || hasSubmittedGuess) {
+        return;
+      }
+      try {
+        await submitGuess(player.playerId);
+      } catch (error) {
+        alert(error.message || "Kunne ikke sende inn gjetningen.");
+      }
     });
-    button.disabled = round.revealed;
+    button.disabled = round.phase !== "guessing" || round.paused || hasSubmittedGuess || state.submittingGuess;
     els.guessOptions.appendChild(button);
   }
-  els.submitGuessBtn.disabled = round.revealed;
 }
 
 function playerStatus(player) {
@@ -569,6 +861,30 @@ function playerStatus(player) {
   return "Venter på offentlig playlist";
 }
 
+function renderHostPlaylistSelect() {
+  if (!els.hostPlaylistSelect) {
+    return;
+  }
+  const previousValue = state.selectedHostPlaylistId || "";
+  els.hostPlaylistSelect.innerHTML = '<option value="">Velg en Spotify-playlist</option>';
+  for (const playlist of state.hostPlaylists) {
+    const option = document.createElement("option");
+    option.value = playlist.id;
+    option.textContent = formatPlaylistOptionLabel(playlist.name, playlist.trackCount);
+    option.title = `${playlist.name} (${playlist.trackCount} spor)`;
+    els.hostPlaylistSelect.appendChild(option);
+  }
+  els.hostPlaylistSelect.value = previousValue;
+  els.hostPlaylistSelect.disabled = !isHost() || !state.spotifyToken || Boolean(state.room?.started);
+}
+
+function formatPlaylistOptionLabel(name, trackCount) {
+  const suffix = ` (${trackCount} spor)`;
+  const maxNameLength = 28;
+  const trimmedName = name.length > maxNameLength ? `${name.slice(0, maxNameLength - 1).trimEnd()}…` : name;
+  return `${trimmedName}${suffix}`;
+}
+
 function shouldAutoSyncRoom(room) {
   const host = room.players.find((player) => player.playerId === state.playerId);
   if (!host?.trackCount) {
@@ -577,12 +893,38 @@ function shouldAutoSyncRoom(room) {
   return room.players.some((player) => !player.isHost && player.guestPlaylistId && !player.guestPlaylistSynced);
 }
 
+function getRoundToken(room) {
+  const round = room?.currentRound;
+  if (!round) {
+    return null;
+  }
+  return `${round.index}:${round.uri}:${round.revealed}`;
+}
+
 function isHost() {
   return state.room?.hostId === state.playerId;
 }
 
 function persistSession() {
   localStorage.setItem(storageKey, JSON.stringify({ roomCode: state.roomCode, playerId: state.playerId }));
+}
+
+function clearRoomState() {
+  state.suppressReconnect = true;
+  if (state.roomCode) {
+    localStorage.removeItem(`guessify-host-cache:${state.roomCode}`);
+  }
+  state.previewAudio?.pause();
+  state.previewAudio = null;
+  clearTimeout(state.websocketReconnectTimer);
+  state.websocket?.close();
+  state.websocket = null;
+  state.room = null;
+  state.roomCode = null;
+  state.playerId = null;
+  state.activeRoundToken = null;
+  state.roundAnnouncement = "";
+  localStorage.removeItem(storageKey);
 }
 
 function restoreSession() {

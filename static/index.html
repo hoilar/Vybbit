@@ -3,14 +3,14 @@
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Guessify</title>
-    <link rel="stylesheet" href="/static/styles.css" />
+    <title>Vybbit</title>
+    <link rel="stylesheet" href="/static/styles.css?v=20260324b" />
   </head>
   <body>
     <main class="shell">
       <section class="hero">
-        <p class="eyebrow">Guessify</p>
-        <h1>Spotify-quiz for vennegjengen.</h1>
+        <img class="hero-logo" src="/static/Vybbit.png" alt="Vybbit logo" />
+        <p class="eyebrow">Vybbit</p>
         <p class="lede">
           Host kobler til Spotify Premium. Andre spillere blir med med romkode og limer inn en offentlig Spotify-playlist.
         </p>
@@ -51,6 +51,8 @@
           <div class="actions">
             <button id="copy-room-code-btn" class="secondary">Kopier kode</button>
             <button id="connect-spotify-btn">Koble til Spotify</button>
+            <button id="leave-room-btn" class="secondary hidden">Forlat rom</button>
+            <button id="end-room-btn" class="secondary hidden">Avslutt spill</button>
           </div>
         </div>
 
@@ -72,10 +74,20 @@
           <article class="card" id="host-controls-card">
             <h3>Host-kontroll</h3>
             <p class="muted" id="host-sync-status">Koble til Spotify for å hente egne lister og importere gjestenes offentlige playlists.</p>
+            <label>
+              Din playlist
+              <select id="host-playlist-select">
+                <option value="">Velg en Spotify-playlist</option>
+              </select>
+            </label>
             <button id="sync-playlists-btn" class="secondary">Oppdater spillelister</button>
             <label>
               Antall runder
               <input id="round-count" type="number" min="1" max="20" value="5" />
+            </label>
+            <label>
+              Gjettetid per runde
+              <input id="guess-duration" type="number" min="5" max="60" value="15" />
             </label>
             <button id="start-game-btn">Start spill</button>
             <button id="next-round-btn" class="secondary hidden">Neste runde</button>
@@ -101,6 +113,8 @@
               <h3>Aktiv runde</h3>
               <span id="round-progress">0 / 0</span>
             </div>
+            <p id="round-announcement" class="muted hidden"></p>
+            <p id="phase-timer" class="muted"></p>
             <div class="cover-wrap">
               <img id="album-cover" alt="Albumcover" />
             </div>
@@ -108,6 +122,8 @@
             <div class="actions">
               <button id="play-track-btn">Spill av låt</button>
               <button id="play-preview-btn" class="secondary">Spill preview</button>
+              <button id="pause-game-btn" class="secondary hidden">Pause</button>
+              <button id="reset-game-btn" class="secondary hidden">Nytt spill</button>
             </div>
             <div id="reveal-box" class="reveal-box hidden"></div>
           </article>
@@ -115,12 +131,11 @@
           <article class="card">
             <h3>Hvem eier sangen?</h3>
             <div id="guess-options" class="guess-options"></div>
-            <button id="submit-guess-btn">Send inn gjetning</button>
           </article>
         </div>
       </section>
     </main>
 
-    <script src="/static/app.js" type="module"></script>
+    <script src="/static/app.js?v=20260324b" type="module"></script>
   </body>
   </html>
