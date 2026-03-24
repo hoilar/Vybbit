@@ -1,0 +1,242 @@
+:root {
+  color-scheme: light;
+  --bg: #f8f1e7;
+  --bg-alt: #f2d8b3;
+  --ink: #132a13;
+  --ink-soft: #42603d;
+  --line: rgba(19, 42, 19, 0.12);
+  --panel: rgba(255, 252, 246, 0.86);
+  --accent: #f26a2e;
+  --accent-dark: #cb4d17;
+  --shadow: 0 24px 60px rgba(80, 42, 14, 0.15);
+  --radius: 24px;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  min-height: 100vh;
+  font-family: Georgia, "Times New Roman", serif;
+  color: var(--ink);
+  background:
+    radial-gradient(circle at top left, rgba(242, 106, 46, 0.24), transparent 28%),
+    radial-gradient(circle at bottom right, rgba(19, 42, 19, 0.16), transparent 24%),
+    linear-gradient(140deg, var(--bg), #fff7ed 55%, var(--bg-alt));
+}
+
+.shell {
+  width: min(1120px, calc(100% - 32px));
+  margin: 0 auto;
+  padding: 48px 0 72px;
+}
+
+.hero {
+  padding: 16px 8px 32px;
+}
+
+.eyebrow {
+  margin: 0 0 8px;
+  font-size: 0.78rem;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+  color: var(--ink-soft);
+}
+
+h1,
+h2,
+h3,
+p {
+  margin-top: 0;
+}
+
+h1 {
+  max-width: 12ch;
+  font-size: clamp(3rem, 7vw, 5.5rem);
+  line-height: 0.95;
+  margin-bottom: 16px;
+}
+
+.lede {
+  max-width: 62ch;
+  color: var(--ink-soft);
+  font-size: 1.08rem;
+}
+
+.panel {
+  background: var(--panel);
+  border: 1px solid rgba(255, 255, 255, 0.55);
+  backdrop-filter: blur(18px);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+  padding: 24px;
+  margin-top: 20px;
+}
+
+.grid,
+.game-grid {
+  display: grid;
+  gap: 20px;
+}
+
+.lobby-grid {
+  align-items: start;
+}
+
+.grid {
+  grid-template-columns: repeat(auto-fit, minmax(260px, 1fr));
+}
+
+.game-grid {
+  grid-template-columns: 1.35fr 1fr;
+}
+
+.card {
+  background: rgba(255, 255, 255, 0.7);
+  border: 1px solid var(--line);
+  border-radius: 20px;
+  padding: 20px;
+}
+
+.highlight {
+  background: linear-gradient(180deg, rgba(242, 106, 46, 0.1), rgba(255, 255, 255, 0.8));
+}
+
+.card-head,
+.room-header,
+.status-strip,
+.actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.room-header {
+  margin-bottom: 16px;
+}
+
+.status-strip {
+  flex-wrap: wrap;
+  margin-bottom: 20px;
+  color: var(--ink-soft);
+  font-size: 0.92rem;
+}
+
+label {
+  display: grid;
+  gap: 8px;
+  margin-bottom: 12px;
+  font-weight: 700;
+}
+
+input {
+  width: 100%;
+  border: 1px solid var(--line);
+  border-radius: 14px;
+  padding: 14px 16px;
+  font: inherit;
+  background: rgba(255, 255, 255, 0.78);
+}
+
+button {
+  border: 0;
+  border-radius: 999px;
+  padding: 14px 18px;
+  font: inherit;
+  font-weight: 700;
+  cursor: pointer;
+  background: var(--accent);
+  color: rgb(255, 255, 255);
+  transition: transform 140ms ease, background 140ms ease;
+}
+
+button:hover {
+  transform: translateY(-1px);
+  background: var(--accent-dark);
+}
+
+button.secondary {
+  background: white;
+  color: var(--ink);
+  border: 1px solid var(--line);
+}
+
+.players-list,
+.guess-options {
+  display: grid;
+  gap: 10px;
+}
+
+.players-list {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.players-list li,
+.guess-option {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid var(--line);
+  border-radius: 16px;
+  padding: 12px 14px;
+  background: rgba(255, 128, 25, 0.68);
+}
+
+.guess-option.selected {
+  border-color: var(--accent);
+  background: rgba(242, 106, 46, 0.12);
+}
+
+.pill {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: rgba(19, 42, 19, 0.08);
+  font-size: 0.85rem;
+}
+
+.cover-wrap {
+  aspect-ratio: 1;
+  border-radius: 24px;
+  overflow: hidden;
+  background: rgba(19, 42, 19, 0.08);
+  margin-bottom: 18px;
+}
+
+.cover-wrap img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.reveal-box {
+  margin-top: 16px;
+  padding: 16px;
+  border-radius: 18px;
+  background: rgba(19, 42, 19, 0.08);
+}
+
+.muted {
+  color: var(--ink-soft);
+}
+
+.hidden {
+  display: none !important;
+}
+
+@media (max-width: 860px) {
+  .game-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .room-header,
+  .actions {
+    flex-direction: column;
+    align-items: stretch;
+  }
+}

@@ -1,0 +1,126 @@
+<!doctype html>
+<html lang="no">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Guessify</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <main class="shell">
+      <section class="hero">
+        <p class="eyebrow">Guessify</p>
+        <h1>Spotify-quiz for vennegjengen.</h1>
+        <p class="lede">
+          Host kobler til Spotify Premium. Andre spillere blir med med romkode og limer inn en offentlig Spotify-playlist.
+        </p>
+      </section>
+
+      <section class="panel" id="setup-panel">
+        <div class="grid">
+          <article class="card">
+            <h2>Lag rom</h2>
+            <label>
+              Navnet ditt
+              <input id="host-name" maxlength="32" placeholder="Host" />
+            </label>
+            <button id="create-room-btn">Lag nytt rom</button>
+          </article>
+
+          <article class="card">
+            <h2>Bli med</h2>
+            <label>
+              Navnet ditt
+              <input id="player-name" maxlength="32" placeholder="Spiller" />
+            </label>
+            <label>
+              Romkode
+              <input id="room-code" maxlength="5" placeholder="ABC12" />
+            </label>
+            <button id="join-room-btn">Bli med i rom</button>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="room-panel">
+        <div class="room-header">
+          <div>
+            <p class="eyebrow">Romkode</p>
+            <h2 id="room-code-display">-</h2>
+          </div>
+          <div class="actions">
+            <button id="copy-room-code-btn" class="secondary">Kopier kode</button>
+            <button id="connect-spotify-btn">Koble til Spotify</button>
+          </div>
+        </div>
+
+        <div class="status-strip">
+          <span id="spotify-status">Host ikke koblet til Spotify</span>
+          <span id="host-cache-status">Host-cache tom</span>
+          <span id="room-hint">Gjestene limer inn offentlig playlist-lenke.</span>
+        </div>
+
+        <div class="grid lobby-grid">
+          <article class="card">
+            <div class="card-head">
+              <h3>Spillere</h3>
+              <span id="player-count">0 / 6</span>
+            </div>
+            <ul id="players-list" class="players-list"></ul>
+          </article>
+
+          <article class="card" id="host-controls-card">
+            <h3>Host-kontroll</h3>
+            <p class="muted" id="host-sync-status">Koble til Spotify for å hente egne lister og importere gjestenes offentlige playlists.</p>
+            <button id="sync-playlists-btn" class="secondary">Oppdater spillelister</button>
+            <label>
+              Antall runder
+              <input id="round-count" type="number" min="1" max="20" value="5" />
+            </label>
+            <button id="start-game-btn">Start spill</button>
+            <button id="next-round-btn" class="secondary hidden">Neste runde</button>
+          </article>
+
+          <article class="card hidden" id="guest-playlist-card">
+            <h3>Din playlist</h3>
+            <p class="muted">Lim inn en offentlig Spotify-playlist. Host henter sporene med sin Spotify-innlogging.</p>
+            <label>
+              Playlist-lenke
+              <input id="guest-playlist-url" placeholder="https://open.spotify.com/playlist/..." />
+            </label>
+            <button id="save-playlist-btn">Lagre playlist</button>
+            <p class="muted" id="guest-playlist-status">Ingen playlist lagret ennå.</p>
+          </article>
+        </div>
+      </section>
+
+      <section class="panel hidden" id="game-panel">
+        <div class="game-grid">
+          <article class="card highlight">
+            <div class="card-head">
+              <h3>Aktiv runde</h3>
+              <span id="round-progress">0 / 0</span>
+            </div>
+            <div class="cover-wrap">
+              <img id="album-cover" alt="Albumcover" />
+            </div>
+            <p id="playback-status">Venter på sang...</p>
+            <div class="actions">
+              <button id="play-track-btn">Spill av låt</button>
+              <button id="play-preview-btn" class="secondary">Spill preview</button>
+            </div>
+            <div id="reveal-box" class="reveal-box hidden"></div>
+          </article>
+
+          <article class="card">
+            <h3>Hvem eier sangen?</h3>
+            <div id="guess-options" class="guess-options"></div>
+            <button id="submit-guess-btn">Send inn gjetning</button>
+          </article>
+        </div>
+      </section>
+    </main>
+
+    <script src="/static/app.js" type="module"></script>
+  </body>
+  </html>
