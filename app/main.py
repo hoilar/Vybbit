@@ -19,7 +19,7 @@ from pydantic import BaseModel, Field
 
 BASE_DIR = Path(__file__).resolve().parent.parent
 STATIC_DIR = BASE_DIR / "static"
-MAX_PLAYERS = 6
+MAX_PLAYERS = 50
 ROOM_CODE_LENGTH = 5
 
 
