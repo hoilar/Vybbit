@@ -449,7 +449,8 @@ async function connectSpotify() {
     alert("Mangler SPOTIFY_CLIENT_ID i servermiljøet.");
     return;
   }
-  await startSpotifyAuth(spotifyScopesBase, { roomCode: state.roomCode, playerId: state.playerId, role: "host" });
+  const scopes = state.gameMode === "exposed" ? spotifyScopesExposed : spotifyScopesBase;
+  await startSpotifyAuth(scopes, { roomCode: state.roomCode, playerId: state.playerId, role: "host" });
 }
 
 // SPOTIFY CONNECT (guest / exposed mode)
