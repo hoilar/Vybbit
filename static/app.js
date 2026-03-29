@@ -25,6 +25,9 @@ const state = {
   gameMode: "chill",
   selectedCategory: "top10",
   exposedSynced: false,
+  winnerPopupShown: false,
+  gameMinimized: false,
+  lastShownRoundToken: null,
 };
 
 const els = {
@@ -92,6 +95,18 @@ const els = {
   pauseGameBtn: document.querySelector("#pause-game-btn"),
   revealBox: document.querySelector("#reveal-box"),
   guessOptions: document.querySelector("#guess-options"),
+  // Overlay extras
+  gameMinimizeBtn: document.querySelector("#game-minimize-btn"),
+  scoreboardList: document.querySelector("#scoreboard-list"),
+  // Winner popup
+  winnerPopup: document.querySelector("#winner-popup"),
+  winnerTitle: document.querySelector("#winner-title"),
+  winnerName: document.querySelector("#winner-name"),
+  winnerScore: document.querySelector("#winner-score"),
+  winnerPodium: document.querySelector("#winner-podium"),
+  winnerConfetti: document.querySelector("#winner-confetti"),
+  winnerNewGameBtn: document.querySelector("#winner-new-game-btn"),
+  winnerCloseBtn: document.querySelector("#winner-close-btn"),
 };
 
 const storageKey = "guessify-session";
@@ -173,6 +188,19 @@ function bindEvents() {
   els.pauseGameBtn?.addEventListener("click", onTogglePause);
   els.playTrackBtn?.addEventListener("click", onPlayTrack);
   els.playPreviewBtn?.addEventListener("click", onPlayPreview);
+
+  // Game overlay minimize
+  els.gameMinimizeBtn?.addEventListener("click", () => {
+    state.gameMinimized = true;
+    els.gamePanel.classList.add("hidden");
+  });
+
+  // Winner popup
+  els.winnerCloseBtn?.addEventListener("click", closeWinnerPopup);
+  els.winnerNewGameBtn?.addEventListener("click", () => {
+    closeWinnerPopup();
+    onResetGame();
+  });
 }
 
 function selectMode(mode) {
@@ -313,6 +341,8 @@ async function onStartGameExposed() {
 
 async function onResetGame() {
   if (!confirm("Vil du starte et nytt spill? Poeng og runder nullstilles.")) return;
+  closeWinnerPopup();
+  state.winnerPopupShown = false;
   await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/reset`, {
     method: "POST",
   });
@@ -442,14 +472,24 @@ function updatePhaseTimer() {
   const round = state.room?.currentRound;
   if (!round || !els.phaseTimer) return;
   if (round.paused) {
-    els.phaseTimer.textContent = `Pauset med ${Math.max(Math.ceil(round.pausedRemainingSeconds || 0), 0)}s igjen`;
+    els.phaseTimer.textContent = `⏸ ${Math.max(Math.ceil(round.pausedRemainingSeconds || 0), 0)}s`;
+    els.phaseTimer.classList.remove("timer-urgent");
     return;
   }
-  if (!round.phaseEndsAt) { els.phaseTimer.textContent = ""; return; }
+  if (!round.phaseEndsAt) { els.phaseTimer.textContent = ""; els.phaseTimer.classList.remove("timer-urgent"); return; }
   const remaining = Math.max(Math.ceil(round.phaseEndsAt - Date.now() / 1000), 0);
-  if (round.phase === "guessing") { els.phaseTimer.textContent = `Tid igjen: ${remaining}s`; return; }
-  if (round.phase === "reveal") { els.phaseTimer.textContent = `Neste sang om ${remaining}s`; return; }
+  if (round.phase === "guessing") {
+    els.phaseTimer.textContent = `${remaining}s`;
+    els.phaseTimer.classList.toggle("timer-urgent", remaining <= 5);
+    return;
+  }
+  if (round.phase === "reveal") {
+    els.phaseTimer.textContent = `Neste om ${remaining}s`;
+    els.phaseTimer.classList.remove("timer-urgent");
+    return;
+  }
   els.phaseTimer.textContent = "";
+  els.phaseTimer.classList.remove("timer-urgent");
 }
 
 // SPOTIFY CONNECT (host / chill mode)
@@ -900,7 +940,19 @@ function render() {
   els.modePanel.classList.toggle("hidden", inRoom || Boolean(els.setupPanel && !els.setupPanel.classList.contains("hidden")));
   els.setupPanel?.classList.toggle("hidden", inRoom || Boolean(els.modePanel && !els.modePanel.classList.contains("hidden")));
   els.roomPanel.classList.toggle("hidden", !inRoom);
-  els.gamePanel.classList.toggle("hidden", !room?.currentRound);
+  // Game overlay: auto-show when a new round starts, allow manual minimize
+  const currentToken = getRoundToken(room);
+  if (room?.currentRound) {
+    // New round → reset minimize and show overlay
+    if (currentToken !== state.lastShownRoundToken) {
+      state.gameMinimized = false;
+      state.lastShownRoundToken = currentToken;
+    }
+    els.gamePanel.classList.toggle("hidden", state.gameMinimized);
+  } else {
+    els.gamePanel.classList.add("hidden");
+    state.lastShownRoundToken = null;
+  }
 
   if (!inRoom) {
     // Show correct panel (mode or setup)
@@ -1069,7 +1121,7 @@ function renderGame(room) {
 
   els.roundProgress.textContent = `${round.index + 1} / ${round.total}`;
   els.albumCover.src = round.albumImage ||
-    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' fill='%23f2d8b3'/%3E%3Ccircle cx='256' cy='256' r='110' fill='%23132a13' opacity='0.15'/%3E%3C/svg%3E";
+    "data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 512 512'%3E%3Crect width='512' height='512' fill='%230a0a14'/%3E%3Ccircle cx='256' cy='256' r='110' fill='%23b44aff' opacity='0.1'/%3E%3Ccircle cx='256' cy='256' r='50' fill='%2300e5ff' opacity='0.08'/%3E%3C/svg%3E";
 
   els.playbackStatus.textContent = round.revealed
     ? "Runden er avslørt. Se hvem som eide sangen."
@@ -1094,6 +1146,16 @@ function renderGame(room) {
   }
   updatePhaseTimer();
   renderGuessOptions(room);
+  renderScoreboard(room);
+
+  // Show winner popup when game ends
+  if (!room.started && room.winnerId && !state.winnerPopupShown) {
+    state.winnerPopupShown = true;
+    showWinnerPopup(room);
+  }
+  if (room.started) {
+    state.winnerPopupShown = false;
+  }
 }
 
 function renderGuessOptions(room) {
@@ -1115,6 +1177,83 @@ function renderGuessOptions(room) {
     });
     button.disabled = round.phase !== "guessing" || round.paused || hasSubmittedGuess || state.submittingGuess;
     els.guessOptions.appendChild(button);
+  }
+}
+
+function renderScoreboard(room) {
+  if (!els.scoreboardList) return;
+  const sorted = [...room.players].sort((a, b) => b.score - a.score);
+  const topScore = sorted[0]?.score || 0;
+  els.scoreboardList.innerHTML = "";
+  sorted.forEach((player, i) => {
+    const entry = document.createElement("div");
+    entry.className = "scoreboard-entry" + (i === 0 && topScore > 0 ? " leading" : "");
+    entry.innerHTML = `
+      <span class="scoreboard-rank">${i + 1}</span>
+      <span class="scoreboard-name">${escapeHtml(player.name)}</span>
+      <span class="scoreboard-score">${player.score}p</span>
+    `;
+    els.scoreboardList.appendChild(entry);
+  });
+}
+
+function showWinnerPopup(room) {
+  if (!els.winnerPopup) return;
+  const sorted = [...room.players].sort((a, b) => b.score - a.score);
+  const topScore = sorted[0]?.score || 0;
+  const winners = sorted.filter(p => p.score === topScore);
+  const isTie = winners.length > 1;
+
+  if (isTie) {
+    els.winnerTitle.textContent = "Uavgjort!";
+    els.winnerName.textContent = winners.map(w => w.name).join(" & ");
+  } else {
+    els.winnerTitle.textContent = "Vinner!";
+    els.winnerName.textContent = sorted[0]?.name || "";
+  }
+  els.winnerScore.textContent = `${topScore} poeng`;
+
+  // Build podium
+  els.winnerPodium.innerHTML = "";
+  const medals = ["🥇", "🥈", "🥉"];
+  sorted.forEach((player, i) => {
+    const entry = document.createElement("div");
+    entry.className = "podium-entry";
+    entry.innerHTML = `
+      <span class="podium-rank">${medals[i] || (i + 1)}</span>
+      <span class="podium-name">${escapeHtml(player.name)}</span>
+      <span class="podium-score">${player.score}p</span>
+    `;
+    els.winnerPodium.appendChild(entry);
+  });
+
+  // Spawn confetti
+  spawnConfetti();
+
+  els.winnerPopup.classList.remove("hidden");
+  els.winnerNewGameBtn.classList.toggle("hidden", !isHost());
+}
+
+function closeWinnerPopup() {
+  els.winnerPopup?.classList.add("hidden");
+  if (els.winnerConfetti) els.winnerConfetti.innerHTML = "";
+}
+
+function spawnConfetti() {
+  if (!els.winnerConfetti) return;
+  els.winnerConfetti.innerHTML = "";
+  const colors = ["#ff2d78", "#00e5ff", "#b44aff", "#39ff14", "#ffd700", "#ff6b35"];
+  for (let i = 0; i < 60; i++) {
+    const piece = document.createElement("div");
+    piece.className = "confetti-piece";
+    piece.style.left = Math.random() * 100 + "%";
+    piece.style.background = colors[Math.floor(Math.random() * colors.length)];
+    piece.style.animationDuration = (2 + Math.random() * 2) + "s";
+    piece.style.animationDelay = Math.random() * 1.5 + "s";
+    piece.style.width = (5 + Math.random() * 8) + "px";
+    piece.style.height = (5 + Math.random() * 8) + "px";
+    piece.style.borderRadius = Math.random() > 0.5 ? "50%" : "2px";
+    els.winnerConfetti.appendChild(piece);
   }
 }
 

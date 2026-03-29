@@ -4,7 +4,8 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>HearMeOut</title>
-    <link rel="stylesheet" href="/static/styles.css?v=20260327" />
+    <meta name="theme-color" content="#0a0a14" />
+    <link rel="stylesheet" href="/static/styles.css?v=20260329" />
   </head>
   <body>
     <main class="shell">
@@ -12,7 +13,8 @@
         <img class="hero-logo" src="/static/HearMeOut.png" alt="HearMeOut logo" />
         <p class="eyebrow">HearMeOut</p>
         <p class="lede">
-          En sang spilles. Du gjetter hvem i rommet den tilhører.
+          En sang spilles. Du gjetter hvem i rommet den tilhorer.
+          Kjenn vennene dine gjennom musikken deres.
         </p>
       </section>
 
@@ -23,14 +25,25 @@
           <article class="mode-card mode-chill" id="mode-chill-btn" tabindex="0" role="button">
             <div class="mode-icon">🎵</div>
             <h2>Chill</h2>
-            <p class="mode-desc">Del en playlist, bare lek. Kun host trenger Spotify Premium — andre limer inn en offentlig playlist-lenke.</p>
+            <p class="mode-desc">Del en playlist, bare lek. Kun host trenger Spotify Premium — alle andre limer inn en offentlig playlist-lenke.</p>
             <div class="mode-tag">Lav terskel</div>
+            <div class="tip-box">
+              <span class="tip-label">Slik fungerer det</span><br>
+              Host oppretter rommet og kobler til Spotify. Gjestene deler en <strong>offentlig Spotify-playlist-lenke</strong> som host importerer. Sangene mikses og spilles tilfeldig — gjett hvem som eier hvilken sang!
+            </div>
           </article>
           <article class="mode-card mode-exposed" id="mode-exposed-btn" tabindex="0" role="button">
             <div class="mode-icon">🔥</div>
             <h2>Exposed</h2>
-            <p class="mode-desc">Alle logger inn med Spotify Premium. Sangene hentes fra ekte, personlig lyttehistorikk — du vet hva du har hørt.</p>
+            <p class="mode-desc">Alle logger inn med Spotify Premium. Sangene hentes fra ekte, personlig lyttehistorikk — her avsløres den virkelige musikksmaken din.</p>
             <div class="mode-tag mode-tag-hot">Alle trenger Premium</div>
+            <div class="tip-box">
+              <span class="tip-label">Kategorier</span><br>
+              <strong>Top 10</strong> — dine mest spilte,
+              <strong>Nostalgia</strong> — gamle favoritter,
+              <strong>Guilty Pleasure</strong> — mye spilt men aldri delt,
+              <strong>Nytt bekjentskap</strong> — nylig oppdaget.
+            </div>
           </article>
         </div>
       </section>
@@ -44,6 +57,7 @@
         <div class="grid">
           <article class="card">
             <h2>Lag rom</h2>
+            <p class="help-text">Opprett et nytt spillrom. Du blir host og styrer spillets gang.</p>
             <label>
               Navnet ditt
               <input id="host-name" maxlength="32" placeholder="Host" />
@@ -53,13 +67,14 @@
 
           <article class="card">
             <h2>Bli med</h2>
+            <p class="help-text">Har noen delt en romkode med deg? Skriv den inn her for a bli med.</p>
             <label>
               Navnet ditt
               <input id="player-name" maxlength="32" placeholder="Spiller" />
             </label>
             <label>
               Romkode
-              <input id="room-code" maxlength="5" placeholder="ABC12" />
+              <input id="room-code" maxlength="5" placeholder="ABC12" style="text-transform: uppercase;" />
             </label>
             <button id="join-room-btn">Bli med i rom</button>
           </article>
@@ -95,12 +110,16 @@
               <span id="player-count">0 / 8</span>
             </div>
             <ul id="players-list" class="players-list"></ul>
+            <div class="tip-box" style="margin-top: 12px;">
+              <span class="tip-label">Tips</span><br>
+              Del romkoden med vennene dine. Opptil 8 spillere kan bli med. Gront lys = klar til spill.
+            </div>
           </article>
 
           <!-- HOST CONTROLS (Chill mode) -->
           <article class="card" id="host-controls-card">
             <h3>Host-kontroll</h3>
-            <p class="muted" id="host-sync-status">Koble til Spotify for å hente egne lister og importere gjestenes offentlige playlists.</p>
+            <p class="muted" id="host-sync-status">Koble til Spotify for a hente egne lister og importere gjestenes offentlige playlists.</p>
             <label>
               Din playlist
               <select id="host-playlist-select">
@@ -108,6 +127,9 @@
               </select>
             </label>
             <button id="sync-playlists-btn" class="secondary">Oppdater spillelister</button>
+
+            <hr class="neon-divider" />
+
             <label>
               Antall runder
               <input id="round-count" type="number" min="1" max="20" value="5" />
@@ -127,13 +149,16 @@
             <label>
               Runde-kategori
               <select id="category-select">
-                <option value="top10">🏆 Top 10 — sangene du har hørt mest</option>
-                <option value="nostalgia">📼 Nostalgia — gamle favoritter (5+ år)</option>
-                <option value="guilty_pleasure">🙈 Guilty Pleasure — mye hørt, aldri delt</option>
+                <option value="top10">🏆 Top 10 — sangene du har hort mest</option>
+                <option value="nostalgia">📼 Nostalgia — gamle favoritter (5+ ar)</option>
+                <option value="guilty_pleasure">🙈 Guilty Pleasure — mye hort, aldri delt</option>
                 <option value="new_discovery">✨ Nytt bekjentskap — nylig oppdaget</option>
               </select>
             </label>
             <button id="set-category-btn" class="secondary">Lagre kategori</button>
+
+            <hr class="neon-divider" />
+
             <label>
               Antall runder
               <input id="exposed-round-count" type="number" min="1" max="20" value="5" />
@@ -149,57 +174,104 @@
           <!-- GUEST: Chill mode -->
           <article class="card hidden" id="guest-playlist-card">
             <h3>Din playlist</h3>
-            <p class="muted">Lim inn en offentlig Spotify-playlist. Host henter sporene med sin Spotify-innlogging.</p>
+            <p class="help-text">Del en offentlig Spotify-playlist sa host kan importere sangene dine.</p>
+            <div class="tip-box" style="margin-bottom: 14px;">
+              <span class="tip-label">Slik deler du playlist-lenken</span>
+              <ol class="step-list">
+                <li data-step="1.">Apne Spotify-appen (mobil eller desktop)</li>
+                <li data-step="2.">Ga til spillelisten du vil dele</li>
+                <li data-step="3.">Trykk pa de tre prikkene (...) og velg «Del»</li>
+                <li data-step="4.">Velg «Kopier lenke» og lim inn under</li>
+              </ol>
+            </div>
             <label>
               Playlist-lenke
               <input id="guest-playlist-url" placeholder="https://open.spotify.com/playlist/..." />
             </label>
             <button id="save-playlist-btn">Lagre playlist</button>
-            <p class="muted" id="guest-playlist-status">Ingen playlist lagret ennå.</p>
+            <p class="muted" id="guest-playlist-status">Ingen playlist lagret enna.</p>
+            <div class="tip-box" style="margin-top: 10px;">
+              <span class="tip-label">Viktig</span><br>
+              Spillelisten ma vaere satt til <strong>offentlig</strong> i Spotify for at host skal kunne hente sangene. Sjekk under spillelistens innstillinger.
+            </div>
           </article>
 
           <!-- GUEST: Exposed mode -->
           <article class="card hidden" id="guest-exposed-card">
             <h3>Koble til Spotify</h3>
-            <p class="muted" id="guest-exposed-desc">Host velger en kategori. Koble til Spotify Premium for å hente dine personlige spor.</p>
+            <p class="help-text" id="guest-exposed-desc">I Exposed-modus henter vi sanger rett fra din Spotify-historikk. Koble til med Premium-kontoen din for a delta.</p>
             <button id="guest-connect-spotify-btn">Koble til Spotify Premium</button>
             <p class="muted" id="guest-exposed-status">Ikke koblet til.</p>
+            <div class="tip-box" style="margin-top: 10px;">
+              <span class="tip-label">Visste du?</span><br>
+              I Exposed-modus bruker vi din faktiske lyttehistorikk — sa vaer forberedt pa at dine guilty pleasures kan bli avslørt!
+            </div>
           </article>
         </div>
       </section>
 
-      <!-- GAME PANEL -->
-      <section class="panel hidden" id="game-panel">
-        <div class="game-grid">
-          <article class="card highlight">
-            <div class="card-head">
-              <h3>Aktiv runde</h3>
-              <span id="round-progress">0 / 0</span>
-            </div>
-            <p id="round-announcement" class="muted hidden"></p>
-            <p id="phase-timer" class="muted"></p>
+    </main>
+
+    <!-- GAME OVERLAY (fullscreen modal) -->
+    <div class="game-overlay hidden" id="game-panel">
+      <div class="game-overlay-inner">
+        <!-- Top bar: round + timer -->
+        <div class="game-topbar">
+          <span class="game-round-badge" id="round-progress">0 / 0</span>
+          <div class="game-timer-display" id="phase-timer"></div>
+          <button id="game-minimize-btn" class="secondary game-minimize-btn">Lobby</button>
+        </div>
+
+        <p id="round-announcement" class="game-announcement hidden"></p>
+
+        <div class="game-main-grid">
+          <!-- Left: album + playback -->
+          <div class="game-track-area">
             <div class="cover-wrap">
               <img id="album-cover" alt="Albumcover" />
             </div>
-            <p id="playback-status">Venter på sang...</p>
-            <div class="actions">
-              <button id="play-track-btn">Spill av låt</button>
-              <button id="play-preview-btn" class="secondary">Spill preview</button>
+            <p id="playback-status" class="game-playback-status">Venter pa sang...</p>
+            <div class="game-playback-actions">
+              <button id="play-track-btn">Spill av</button>
+              <button id="play-preview-btn" class="secondary">Preview</button>
               <button id="pause-game-btn" class="secondary hidden">Pause</button>
               <button id="reset-game-btn" class="secondary hidden">Nytt spill</button>
             </div>
             <div id="reveal-box" class="reveal-box hidden"></div>
-          </article>
+          </div>
 
-          <article class="card">
+          <!-- Right: guess options + scoreboard -->
+          <div class="game-guess-area">
             <h3>Hvem eier sangen?</h3>
+            <p class="help-text">Trykk pa spilleren du tror eier sangen!</p>
             <div id="guess-options" class="guess-options"></div>
-          </article>
-        </div>
-      </section>
-    </main>
 
-    <script src="/static/app.js?v=20260327" type="module"></script>
+            <div class="game-scoreboard">
+              <h3>Scoreboard</h3>
+              <div id="scoreboard-list" class="scoreboard-list"></div>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- WINNER POPUP -->
+    <div class="winner-overlay hidden" id="winner-popup">
+      <div class="winner-modal">
+        <div class="winner-confetti" id="winner-confetti"></div>
+        <div class="winner-crown">👑</div>
+        <h2 class="winner-title" id="winner-title">Vinner!</h2>
+        <p class="winner-name" id="winner-name"></p>
+        <p class="winner-score" id="winner-score"></p>
+        <div class="winner-podium" id="winner-podium"></div>
+        <div class="winner-actions">
+          <button id="winner-new-game-btn">Nytt spill</button>
+          <button id="winner-close-btn" class="secondary">Lukk</button>
+        </div>
+      </div>
+    </div>
+
+    <script src="/static/app.js?v=20260329" type="module"></script>
 
     <footer class="admin-footer">
       <a href="/admin" class="admin-link">⚙ Admin / Dev</a>
