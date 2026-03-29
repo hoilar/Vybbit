@@ -161,10 +161,11 @@ class Room:
         round_data = self.current_round()
         if not round_data:
             return []
+        owner_id = round_data.get("ownerPlayerId")
         return [
             player_id
             for player_id, player in self.players.items()
-            if player.connected
+            if player.connected and player_id != owner_id
         ]
 
 
@@ -192,6 +193,8 @@ class RoomManager:
     async def join_room(self, code: str, name: str) -> tuple[Room, Player]:
         async with self.lock:
             room = self._get_room(code)
+            if room.started:
+                raise HTTPException(status_code=400, detail="Spillet er allerede i gang.")
             if len(room.players) >= MAX_PLAYERS:
                 raise HTTPException(status_code=400, detail="Rommet er fullt.")
             player = Player(player_id=self._generate_player_id(), name=name.strip())
@@ -286,12 +289,42 @@ class RoomManager:
                 for track in track_pool
                 if len(track_owners.get(track["trackId"], set())) == 1
             ]
-            if len(round_pool) < rounds:
+            # Group unique tracks by owner for balanced distribution
+            tracks_by_owner: dict[str, list[dict[str, Any]]] = {}
+            for track in round_pool:
+                owner = track["ownerPlayerId"]
+                tracks_by_owner.setdefault(owner, []).append(track)
+            # Shuffle each owner's tracks
+            for owner_tracks in tracks_by_owner.values():
+                random.shuffle(owner_tracks)
+            num_players = len(tracks_by_owner)
+            if num_players == 0:
                 raise HTTPException(
                     status_code=400,
-                    detail="For få unike sanger tilgjengelig for valgt antall runder.",
+                    detail="Ingen unike sanger tilgjengelig.",
                 )
-            room.rounds = random.sample(round_pool, k=rounds)
+            songs_per_player = rounds // num_players
+            extra = rounds % num_players
+            # Check each player has enough tracks
+            owner_ids = list(tracks_by_owner.keys())
+            random.shuffle(owner_ids)
+            total_available = 0
+            for i, owner_id in enumerate(owner_ids):
+                needed = songs_per_player + (1 if i < extra else 0)
+                available = len(tracks_by_owner[owner_id])
+                total_available += min(available, needed)
+            if total_available < rounds:
+                raise HTTPException(
+                    status_code=400,
+                    detail=f"For få unike sanger. Hver spiller trenger minst {songs_per_player} unike sanger. Be spillerne velge spillelister med flere sanger.",
+                )
+            # Pick balanced tracks via round-robin
+            selected: list[dict[str, Any]] = []
+            for i, owner_id in enumerate(owner_ids):
+                take = songs_per_player + (1 if i < extra else 0)
+                selected.extend(tracks_by_owner[owner_id][:take])
+            random.shuffle(selected)
+            room.rounds = selected
             room.started = True
             room.current_round_index = 0
             room.current_guesses = {}
@@ -309,6 +342,7 @@ class RoomManager:
                 raise HTTPException(status_code=400, detail="Ingen aktiv runde.")
             if room.round_phase != "guessing":
                 raise HTTPException(status_code=400, detail="Runden er allerede avslørt.")
+            self._get_player(room, player_id)
             if guess_player_id not in room.players:
                 raise HTTPException(status_code=404, detail="Ugyldig spiller.")
             room.current_guesses[player_id] = guess_player_id
@@ -423,17 +457,22 @@ class RoomManager:
             return room
 
     async def broadcast_state(self, code: str) -> None:
-        room = self.rooms.get(code)
-        if not room:
-            return
-        payload = json.dumps({"type": "room_state", "room": self.serialize_room(room)})
+        async with self.lock:
+            room = self.rooms.get(code)
+            if not room:
+                return
+            payload = json.dumps({"type": "room_state", "room": self.serialize_room(room)})
+            sockets = [
+                (pid, ws)
+                for pid, wss in self.connections.get(code, {}).items()
+                for ws in wss
+            ]
         stale: list[tuple[str, WebSocket]] = []
-        for player_id, sockets in self.connections.get(code, {}).items():
-            for websocket in sockets:
-                try:
-                    await websocket.send_text(payload)
-                except Exception:
-                    stale.append((player_id, websocket))
+        for player_id, websocket in sockets:
+            try:
+                await websocket.send_text(payload)
+            except Exception:
+                stale.append((player_id, websocket))
         if stale:
             async with self.lock:
                 for player_id, websocket in stale:
@@ -474,7 +513,7 @@ class RoomManager:
             "players": [player.public_state(room.game_mode) for player in room.players.values()],
             "hostId": room.host_id,
             "currentRound": round_payload,
-            "guesses": room.current_guesses,
+            "guesses": room.current_guesses if room.reveal_round else {pid: "__hidden__" for pid in room.current_guesses},
             "winnerId": room.winner_id,
         }
 
@@ -517,8 +556,9 @@ class RoomManager:
         room.phase_ends_at = room.phase_started_at + room.reveal_duration_seconds
         owner_id = current_round["ownerPlayerId"]
         for guesser_id, guess_player_id in room.current_guesses.items():
-            if guess_player_id == owner_id:
-                room.players[guesser_id].score += 1
+            player = room.players.get(guesser_id)
+            if player and guess_player_id == owner_id:
+                player.score += 1
         self._schedule_timer_locked(room, "reveal", room.current_round_index, room.phase_ends_at)
 
     def _winner_id(self, room: Room) -> Optional[str]:
@@ -767,6 +807,10 @@ async def room_ws(websocket: WebSocket, code: str, player_id: str) -> None:
     except HTTPException:
         await websocket.close(code=1008)
     except WebSocketDisconnect:
+        pass
+    except Exception:
+        pass
+    finally:
         room = await manager.disconnect(code.upper(), player_id, websocket)
         if room:
             await manager.broadcast_state(room.code)

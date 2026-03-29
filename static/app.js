@@ -4,6 +4,8 @@ const state = {
   playerId: null,
   room: null,
   spotifyToken: null,
+  spotifyRefreshToken: null,
+  spotifyTokenExpiresAt: null,
   spotifyProfile: null,
   hostPlaylists: [],
   selectedHostPlaylistId: null,
@@ -198,15 +200,20 @@ async function onCreateRoom() {
     alert("Skriv inn navn på minst 2 tegn.");
     return;
   }
-  const data = await fetchJson("/api/rooms", {
-    method: "POST",
-    body: JSON.stringify({ host_name: hostName, game_mode: state.gameMode }),
-  });
-  state.roomCode = data.roomCode;
-  state.playerId = data.playerId;
-  state.room = data.room;
-  persistSession();
-  connectWebSocket();
+  try {
+    const data = await fetchJson("/api/rooms", {
+      method: "POST",
+      body: JSON.stringify({ host_name: hostName, game_mode: state.gameMode }),
+    });
+    state.roomCode = data.roomCode;
+    state.playerId = data.playerId;
+    state.room = data.room;
+    persistSession();
+    connectWebSocket();
+  } catch (error) {
+    alert(error.message || "Kunne ikke opprette rom.");
+    return;
+  }
   render();
 }
 
@@ -217,17 +224,22 @@ async function onJoinRoom() {
     alert("Skriv inn navn og gyldig romkode.");
     return;
   }
-  const data = await fetchJson(`/api/rooms/${roomCode}/join`, {
-    method: "POST",
-    body: JSON.stringify({ name }),
-  });
-  state.roomCode = data.roomCode;
-  state.playerId = data.playerId;
-  state.room = data.room;
-  // Detect mode from room
-  state.gameMode = data.room.gameMode || "chill";
-  persistSession();
-  connectWebSocket();
+  try {
+    const data = await fetchJson(`/api/rooms/${roomCode}/join`, {
+      method: "POST",
+      body: JSON.stringify({ name }),
+    });
+    state.roomCode = data.roomCode;
+    state.playerId = data.playerId;
+    state.room = data.room;
+    // Detect mode from room
+    state.gameMode = data.room.gameMode || "chill";
+    persistSession();
+    connectWebSocket();
+  } catch (error) {
+    alert(error.message || "Kunne ikke bli med i rommet.");
+    return;
+  }
   render();
 }
 
@@ -383,7 +395,8 @@ function connectWebSocket() {
   state.websocket = new WebSocket(`${protocol}//${location.host}/ws/${state.roomCode}/${state.playerId}`);
   state.websocket.addEventListener("open", () => clearTimeout(state.websocketReconnectTimer));
   state.websocket.addEventListener("message", async (event) => {
-    const message = JSON.parse(event.data);
+    let message;
+    try { message = JSON.parse(event.data); } catch { return; }
     if (message.type === "room_closed") {
       clearRoomState();
       render();
@@ -513,8 +526,23 @@ async function handleSpotifyCallback() {
     }),
   });
   const tokenData = await tokenResponse.json();
+  if (!tokenResponse.ok || !tokenData.access_token) {
+    const detail = tokenData.error_description || tokenData.error || "Kunne ikke hente Spotify-token.";
+    console.error("Spotify token exchange failed:", detail);
+    alert(`Spotify-innlogging feilet: ${detail}`);
+    url.searchParams.delete("code");
+    url.searchParams.delete("state");
+    history.replaceState({}, document.title, url.pathname);
+    return;
+  }
   state.spotifyToken = tokenData.access_token;
-  sessionStorage.setItem(spotifySessionKey, JSON.stringify({ token: state.spotifyToken }));
+  state.spotifyRefreshToken = tokenData.refresh_token || null;
+  state.spotifyTokenExpiresAt = tokenData.expires_in ? Date.now() + tokenData.expires_in * 1000 - 60000 : null;
+  sessionStorage.setItem(spotifySessionKey, JSON.stringify({
+    token: state.spotifyToken,
+    refreshToken: state.spotifyRefreshToken,
+    expiresAt: state.spotifyTokenExpiresAt,
+  }));
   const role = sessionStorage.getItem("guessify-auth-role") || "host";
   sessionStorage.removeItem("guessify-auth-role");
   if (spotifyState) {
@@ -527,16 +555,27 @@ async function handleSpotifyCallback() {
   url.searchParams.delete("state");
   history.replaceState({}, document.title, url.pathname);
   await refreshRoom();
-  if (state.gameMode === "exposed") {
-    if (isHost()) {
-      await syncExposedHostLibrary();
+  try {
+    if (state.gameMode === "exposed") {
+      if (isHost()) {
+        await syncExposedHostLibrary();
+      } else {
+        await syncExposedGuestLibrary();
+      }
     } else {
-      await syncExposedGuestLibrary();
+      // chill / host
+      await syncHostLibrary();
+      await syncRoomPlaylists();
     }
-  } else {
-    // chill / host
-    await syncHostLibrary();
-    await syncRoomPlaylists();
+  } catch (error) {
+    const msg = error.message || "Kunne ikke synkronisere med Spotify.";
+    console.error("Post-auth sync failed:", error);
+    if (state.gameMode === "exposed") {
+      const statusEl = isHost() ? els.hostExposedStatus : els.guestExposedStatus;
+      if (statusEl) statusEl.textContent = msg;
+    } else {
+      if (els.hostSyncStatus) els.hostSyncStatus.textContent = msg;
+    }
   }
 }
 
@@ -688,13 +727,22 @@ async function syncRoomPlaylists() {
     await syncHostLibrary();
     for (const player of state.room.players) {
       if (player.isHost || !player.guestPlaylistId || player.guestPlaylistSynced) continue;
-      const playlistMeta = await fetchSpotify(`https://api.spotify.com/v1/playlists/${player.guestPlaylistId}?fields=name`);
-      const tracks = await fetchPlaylistTracks(player.guestPlaylistId, playlistMeta.name);
-      if (!tracks.length) continue;
-      await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/import/${player.playerId}`, {
-        method: "POST",
-        body: JSON.stringify({ playlist_id: player.guestPlaylistId, playlist_name: playlistMeta.name || "Spotify Playlist", tracks }),
-      });
+      try {
+        const playlistMeta = await fetchSpotify(`https://api.spotify.com/v1/playlists/${player.guestPlaylistId}?fields=name`);
+        const tracks = await fetchPlaylistTracks(player.guestPlaylistId, playlistMeta.name);
+        if (!tracks.length) {
+          if (els.hostSyncStatus) els.hostSyncStatus.textContent = `${player.name}: Ingen spor funnet i spillelisten.`;
+          continue;
+        }
+        await fetchJson(`/api/rooms/${state.roomCode}/players/${state.playerId}/import/${player.playerId}`, {
+          method: "POST",
+          body: JSON.stringify({ playlist_id: player.guestPlaylistId, playlist_name: playlistMeta.name || "Spotify Playlist", tracks }),
+        });
+      } catch (playerError) {
+        const msg = playerError.message || "Ukjent feil";
+        if (els.hostSyncStatus) els.hostSyncStatus.textContent = `${player.name}: Kunne ikke hente spilleliste — ${msg}`;
+        // Continue with remaining players instead of aborting entire sync
+      }
     }
     if (els.hostSyncStatus) els.hostSyncStatus.textContent = "Spillelister oppdatert.";
   } catch (error) {
@@ -806,30 +854,40 @@ function announceRound(round) {
   state.roundAnnouncementTimer = window.setTimeout(() => { state.roundAnnouncement = ""; render(); }, 3500);
 }
 
-async function ensureSpotifyWebPlayer() {
-  if (state.spotifyPlayerReady) { await state.spotifyPlayerReady; return; }
-  state.spotifyPlayerReady = new Promise(async (resolve, reject) => {
-    if (!window.Spotify) {
-      await loadScript("https://sdk.scdn.co/spotify-player.js");
-      await new Promise((sdkResolve) => {
-        if (window.Spotify) { sdkResolve(); return; }
-        window.onSpotifyWebPlaybackSDKReady = sdkResolve;
-      });
-    }
-    state.spotifyPlayer = new Spotify.Player({
-      name: "Guessify Host Player",
-      getOAuthToken: (callback) => callback(state.spotifyToken),
-      volume: 0.8,
+async function initSpotifyPlayer() {
+  if (!window.Spotify) {
+    await loadScript("https://sdk.scdn.co/spotify-player.js");
+    await new Promise((resolve) => {
+      if (window.Spotify) { resolve(); return; }
+      window.onSpotifyWebPlaybackSDKReady = resolve;
     });
+  }
+  state.spotifyPlayer = new Spotify.Player({
+    name: "Guessify Host Player",
+    getOAuthToken: (callback) => callback(state.spotifyToken),
+    volume: 0.8,
+  });
+  await new Promise((resolve, reject) => {
     state.spotifyPlayer.addListener("ready", ({ device_id }) => { state.spotifyDeviceId = device_id; resolve(); });
     state.spotifyPlayer.addListener("initialization_error", ({ message }) => reject(new Error(message)));
     state.spotifyPlayer.addListener("authentication_error", ({ message }) => reject(new Error(message)));
     state.spotifyPlayer.addListener("account_error", ({ message }) => reject(new Error(message)));
     state.spotifyPlayer.addListener("playback_error", ({ message }) => { if (els.playbackStatus) els.playbackStatus.textContent = message; });
-    const connected = await state.spotifyPlayer.connect();
-    if (!connected) reject(new Error("Spotify SDK fikk ikke koblet til spilleren."));
+    state.spotifyPlayer.connect().then((connected) => {
+      if (!connected) reject(new Error("Spotify SDK fikk ikke koblet til spilleren."));
+    });
   });
-  await state.spotifyPlayerReady;
+}
+
+async function ensureSpotifyWebPlayer() {
+  if (state.spotifyPlayerReady) { await state.spotifyPlayerReady; return; }
+  state.spotifyPlayerReady = initSpotifyPlayer();
+  try {
+    await state.spotifyPlayerReady;
+  } catch (error) {
+    state.spotifyPlayerReady = null;
+    throw error;
+  }
 }
 
 // ============ RENDER ============
@@ -1166,6 +1224,8 @@ function restoreSpotifySession() {
   try {
     const saved = JSON.parse(raw);
     state.spotifyToken = saved.token || null;
+    state.spotifyRefreshToken = saved.refreshToken || null;
+    state.spotifyTokenExpiresAt = saved.expiresAt || null;
   } catch {
     sessionStorage.removeItem(spotifySessionKey);
   }
@@ -1202,8 +1262,56 @@ async function fetchJson(url, options = {}) {
   return response.json();
 }
 
+async function refreshSpotifyToken() {
+  if (!state.spotifyRefreshToken || !state.config?.spotifyClientId) return false;
+  try {
+    const response = await fetch("https://accounts.spotify.com/api/token", {
+      method: "POST",
+      headers: { "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({
+        client_id: state.config.spotifyClientId,
+        grant_type: "refresh_token",
+        refresh_token: state.spotifyRefreshToken,
+      }),
+    });
+    const data = await response.json();
+    if (!response.ok || !data.access_token) return false;
+    state.spotifyToken = data.access_token;
+    if (data.refresh_token) state.spotifyRefreshToken = data.refresh_token;
+    state.spotifyTokenExpiresAt = Date.now() + (data.expires_in || 3600) * 1000 - 60000;
+    sessionStorage.setItem(spotifySessionKey, JSON.stringify({
+      token: state.spotifyToken,
+      refreshToken: state.spotifyRefreshToken,
+      expiresAt: state.spotifyTokenExpiresAt,
+    }));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+async function ensureValidToken() {
+  if (state.spotifyTokenExpiresAt && Date.now() >= state.spotifyTokenExpiresAt) {
+    await refreshSpotifyToken();
+  }
+}
+
 async function fetchSpotify(url) {
-  const response = await fetch(url, { headers: { Authorization: `Bearer ${state.spotifyToken}` } });
+  await ensureValidToken();
+  let response = await fetch(url, { headers: { Authorization: `Bearer ${state.spotifyToken}` } });
+  // Handle rate limiting
+  if (response.status === 429) {
+    const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    response = await fetch(url, { headers: { Authorization: `Bearer ${state.spotifyToken}` } });
+  }
+  // Handle expired token (try refresh once)
+  if (response.status === 401 && state.spotifyRefreshToken) {
+    const refreshed = await refreshSpotifyToken();
+    if (refreshed) {
+      response = await fetch(url, { headers: { Authorization: `Bearer ${state.spotifyToken}` } });
+    }
+  }
   if (!response.ok) {
     let detail = "Spotify-kall feilet.";
     try { const data = await response.json(); detail = data.error?.message || detail; } catch {}
@@ -1213,10 +1321,22 @@ async function fetchSpotify(url) {
 }
 
 async function spotifyApiFetch(url, options = {}) {
-  const response = await fetch(url, {
+  await ensureValidToken();
+  let response = await fetch(url, {
     ...options,
     headers: { Authorization: `Bearer ${state.spotifyToken}`, "Content-Type": "application/json", ...(options.headers || {}) },
   });
+  if (response.status === 429) {
+    const retryAfter = parseInt(response.headers.get("Retry-After") || "2", 10);
+    await new Promise((r) => setTimeout(r, retryAfter * 1000));
+    response = await fetch(url, { ...options, headers: { Authorization: `Bearer ${state.spotifyToken}`, "Content-Type": "application/json", ...(options.headers || {}) } });
+  }
+  if (response.status === 401 && state.spotifyRefreshToken) {
+    const refreshed = await refreshSpotifyToken();
+    if (refreshed) {
+      response = await fetch(url, { ...options, headers: { Authorization: `Bearer ${state.spotifyToken}`, "Content-Type": "application/json", ...(options.headers || {}) } });
+    }
+  }
   if (!response.ok) {
     let detail = "Spotify-kall feilet.";
     try { const data = await response.json(); detail = data.error?.message || detail; } catch {}
